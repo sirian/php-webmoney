@@ -1,0 +1,24 @@
+{
+    "name": "sirian/webmoney",
+    "description": "Webmoney",
+    "minimum-stability": "stable",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Vasily Khayrulin",
+            "email": "sirianru@gmail.com"
+        }
+    ],
+    "require-dev": {
+    },
+    "autoload": {
+        "psr-4": { "Webmoney\\": "src/" },
+        "exclude-from-classmap": [
+            "/Tests/"
+        ]
+    },
+  "require": {
+    "ext-mbstring": "*",
+        "baibaratsky/php-webmoney": "^0.17.2"
+  }
+}
