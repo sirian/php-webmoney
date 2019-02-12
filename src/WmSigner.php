@@ -2,35 +2,82 @@
 
 namespace Webmoney;
 
-class WMSigner implements SignerInterface
+use function Couchbase\defaultDecoder;
+
+class WmSigner implements SignerInterface
 {
-    protected $wmid;
     protected $keyExponent;
     protected $keyModulus;
 
+    const MATH_GMP = "gmp";
+    const MATH_BCMATH = "bcmath";
+
+    protected static $mathLibrary;
+
     /**
      * WMSigner constructor.
-     * @param $wmid
      * @param $modulus
      * @param $exponent
      * @throws WmException
      */
-    public function __construct($wmid, $modulus, $exponent)
+    public function __construct($modulus, $exponent)
     {
-        $this->wmid = $wmid;
         $this->keyExponent = $exponent;
         $this->keyModulus = $modulus;
 
-        if (!$wmid || !$modulus || !$exponent) {
-            throw new WmException('wmid, modulus and exponent are required');
+        if (!$modulus) {
+            throw new WmException("modulus not provided.");
         }
+
+        if (!$exponent) {
+            throw new WmException("exponent not provided.");
+        }
+    }
+
+    public static function setMathLibrary($library) {
+        static::$mathLibrary = $library;
+    }
+
+    /**
+     * @throws WmException
+     */
+    public static function getMathLibrary() {
+        if (!static::$mathLibrary) {
+            foreach (["gmp" => self::MATH_GMP, "bcmath" => self::MATH_BCMATH] as $extension => $math) {
+                if (extension_loaded($extension)) {
+                    static::$mathLibrary = $math;
+                    break;
+                }
+            }
+        }
+
+        if (!static::$mathLibrary) {
+            throw new WmException("Neither 'gmp' nor 'bcmath' extension loaded");
+        }
+
+        return static::$mathLibrary;
+    }
+
+    /**
+     * @param $xmlKey
+     * @return WmSigner
+     * @throws WmException
+     */
+    public static function fromXml($xmlKey)
+    {
+        $xml = simplexml_load_string($xmlKey);
+
+        $exponent = static::reverseToDecimal(base64_decode((string)$xml->Modulus));
+        $modulus = static::reverseToDecimal(base64_decode((string)$xml->D));
+
+        return new WmSigner($modulus, $exponent);
     }
 
     /**
      * @param $wmid
      * @param $keyFile
      * @param $keyPassword
-     * @return WMSigner
+     * @return WmSigner
      * @throws WmException
      */
     public static function fromKeyFile($wmid, $keyFile, $keyPassword)
@@ -39,25 +86,27 @@ class WMSigner implements SignerInterface
             throw new WmException('Key file not found: '.$keyFile);
         }
 
-        if (!is_readable($keyFile)) {
+        $keyData = file_get_contents($keyFile);
+
+        if (false === $keyData) {
             throw new WmException('Key file is not readable: '.$keyFile);
         }
 
-        $keyData = file_get_contents($keyFile);
-
         return static::fromKeyData($wmid, $keyData, $keyPassword);
     }
-
 
     /**
      * @param $wmid
      * @param $data
      * @param $keyPassword
-     * @return WMSigner
+     * @return WmSigner
      * @throws WmException
      */
     public static function fromKeyData($wmid, $data, $keyPassword)
     {
+        if (!$wmid) {
+            throw new WmException("wmid not provided.");
+        }
         $keyData = Unpacker::create($data)
             ->match("v", 1, "reserved")
             ->match("v", 1, "signflag")
@@ -79,7 +128,7 @@ class WMSigner implements SignerInterface
         $exponent = static::reverseToDecimal($unpacked["exponent"]);
         $modulus = static::reverseToDecimal($unpacked["modulus"]);
 
-        return new WmSigner($wmid, $modulus, $exponent);
+        return new WmSigner($modulus, $exponent);
     }
 
     /**
@@ -114,6 +163,7 @@ class WMSigner implements SignerInterface
         throw new WmException("Could not calculate md4 hash - neither hash() nor mhash() function found");
     }
 
+
     /**
      * @param $m
      * @param $e
@@ -123,14 +173,12 @@ class WMSigner implements SignerInterface
      */
     protected static function bcpowmod($m, $e, $n)
     {
-        if (extension_loaded('gmp')) {
-            return gmp_strval(gmp_powm($m, $e, $n));
+        switch (static::getMathLibrary()) {
+            case static::MATH_GMP:
+                return gmp_strval(gmp_powm($m, $e, $n));
+            case static::MATH_BCMATH:
+                return bcpowmod($m, $e, $n);
         }
-        if (extension_loaded('bcmath')) {
-            return bcpowmod($m, $e, $n);
-        }
-
-        throw new WmException("Could not calculate md4 hash - neither hash() nor mhash() function found");
     }
 
     /**
@@ -140,31 +188,29 @@ class WMSigner implements SignerInterface
      */
     protected static function dec2hex($number)
     {
-        if (extension_loaded('gmp')) {
-            $hex = gmp_strval($number, 16);
-            if (static::strlen($hex) % 2) {
-                $hex = '0'.$hex;
-            }
+        switch (static::getMathLibrary()) {
+            case static::MATH_GMP:
+                $hex = gmp_strval($number, 16);
+                if (static::strlen($hex) % 2) {
+                    $hex = '0'.$hex;
+                }
 
-            return $hex;
+                return $hex;
+            case static::MATH_BCMATH:
+                $hexValues = '0123456789ABCDEF';
+                $hex = '';
+
+                while ($number != '0') {
+                    $hex = $hexValues[bcmod($number, '16')].$hex;
+                    $number = bcdiv($number, '16', 0);
+                }
+
+                if (static::strlen($hex) % 2) {
+                    $hex = '0'.$hex;
+                }
+
+                return $hex;
         }
-        if (extension_loaded('bcmath')) {
-            $hexValues = '0123456789ABCDEF';
-            $hex = '';
-
-            while ($number != '0') {
-                $hex = $hexValues[bcmod($number, '16')].$hex;
-                $number = bcdiv($number, '16', 0);
-            }
-
-            if (static::strlen($hex) % 2) {
-                $hex = '0'.$hex;
-            }
-
-            return $hex;
-        }
-
-        throw new WmException("Could not calculate dec2hex - neither 'gmp' nor 'bcmath' extension found");
     }
 
     /**
@@ -174,22 +220,19 @@ class WMSigner implements SignerInterface
      */
     protected static function hex2dec($number)
     {
-        if (extension_loaded('gmp')) {
-            return gmp_strval("0x$number", 10);
+        switch (static::getMathLibrary()) {
+            case static::MATH_GMP:
+                return gmp_strval("0x".$number, 10);
+            case static::MATH_BCMATH:
+                $decValue = '0';
+                $number = strrev(strtoupper($number));
+                for ($i = 0; $i < static::strlen($number); $i++) {
+                    $n = hexdec($number[$i]);
+                    $decValue = bcadd(bcmul(bcpow('16', $i, 0), $n, 0), $decValue, 0);
+                }
+
+                return $decValue;
         }
-        if (extension_loaded('bcmath')) {
-
-            $decValue = '0';
-            $number = strrev(strtoupper($number));
-
-            for ($i = 0; $i < static::strlen($number); $i++) {
-                $n = hexdec($number[$i]);
-                $decValue = bcadd(bcmul(bcpow('16', $i, 0), $n, 0), $decValue, 0);
-            }
-
-            return $decValue;
-        }
-        throw new WmException("Could not calculate hex2dec - neither 'gmp' nor 'bcmath' extension found");
     }
 
     protected static function shortunswap($hex)
@@ -255,7 +298,7 @@ class WMSigner implements SignerInterface
         $digest = static::md4($data);
 
         if (0 !== strcmp($digest, $checksum)) {
-            throw new WmException('Checksum failed. KWM seems corrupted.');
+            throw new WmException('Hash check failed. Key data seems to be corrupted.');
         }
     }
 
